@@ -2,7 +2,7 @@ from ast import For
 import email
 from email import message
 from importlib.machinery import FrozenImporter
-from re import template
+from re import U, template
 from fastapi import BackgroundTasks, FastAPI, Security, status, HTTPException, Depends, Request, Body, File, UploadFile, Form
 from pydantic import BaseModel, EmailStr
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -16,6 +16,8 @@ import time
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from typing import List, Optional
+from fastapi_jwt_auth import AuthJWT
+
 
 
 Base.metadata.create_all(engine)
@@ -25,58 +27,102 @@ app = FastAPI()
 templates = Jinja2Templates(directory='htmldirectory')
 
 
-@app.get('/home/{user_name}', response_class=HTMLResponse)
-def write_home(request: Request, user_name:str):
-    return templates.TemplateResponse("home.html", {'request':request, 'username': user_name})
+class Settings(BaseModel):
+    authjwt_secret_key:str = '90eb11fd1ecbde3b265222216d12c8646ba56bcf2c285235541df67cc3cfce75'
 
 
-@app.post('/submitform')
-async def handle_form(assignment:str = Form(...), assignment_file: UploadFile = File(...)):
-    print(assignment)
-    print(assignment_file.filename)
-    content_assignment= await assignment_file.read()
-    print(content_assignment)
-    return f"Your Assignment and Your Photo is uploaded !!!"
+@AuthJWT.load_config
+def get_config():
+    return Settings()
+
+
+class User(BaseModel):
+    username:str
+    email:str
+    password:str
+
+class UserInDB(User):
+    hashed_password: str
+
+
+    class Config:
+        schema_extra={
+            "example":{
+                "username":"sanjana",
+                "email":"sanjana@gmail.com",
+                "password": "sanjana"
+            }
+        }
+
+class UserLogin(BaseModel):
+    username:str
+    password:str
+
+    class Config:
+        schema_extra={
+            "example":{
+                "username":"sanjana",
+                "password": "sanjana"
+            }
+        }
+users = []
+
+@app.post("/signup", status_code=201)
+def create_user(user:User):
+    new_user={
+        "username":user.username,
+        "email":user.email,
+        "password": user.password
+    }
+
+    users.append(new_user)
+    return new_user
+
+
+@app.get('/users', response_model=List[User])
+def get_users():
+    return users
+
+
+@app.post('/login')
+def login(user:UserLogin, Authorize:AuthJWT= Depends()):
+    for u in users:
+        if (u["username"]==user.username) and (u["password"]==user.password):
+            access_token = Authorize.create_access_token(subject=user.username)
+            refresh_token = Authorize.create_refresh_token(subject=user.username)
+
+            return {"access_token": access_token, "refresh_token": refresh_token}
+
+        raise HTTPException(status_code='401', detail="Invalid username or password ")
+
+
 
 
 Security=HTTPBasic()
 
+
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 oauth_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-@app.get("/security-auth")
-async def profile_pic(token:str= Depends(oauth_scheme)):
-    print(token)
-    return{
-        "user": "sanjana",
-        "token": token,
-        "profile_pic": 'my_pic'
-    }
-
-def get_current_username(credentials: HTTPBasicCredentials = Depends(Security)):
-    correct_username = secrets.compare_digest(credentials.username, "sanjana")
-    correct_password = secrets.compare_digest(credentials.password, "password")
-    if not (correct_username and correct_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-    return credentials.username
+def fake_hash_password(password: str):
+    return "fakehashed" + password
 
 
-@app.get("/authenticate-basic")
-def read_current_user(username: str = Depends(get_current_username)):
-    return {"username": username}
+@app.post('/token')
+async def token(form_data:OAuth2PasswordRequestForm=Depends()):
+    return {"access_token": form_data.username +'token'}
 
 
 
 @app.get("/")
-def root():
-    return "-------   Todo App Creater  -------"
+def root(token:str= Depends(oauth_scheme)):
+    print("-------   Todo App Creater  -------")
+    return {'the_token':token}
 
 
 @app.post("/todo-create", status_code=status.HTTP_201_CREATED)
-def create_todo(todo: schemas.ToDo):
+def create_todo(todo: schemas.ToDo ,token:str= Depends(oauth_scheme)):
+    print(token)
 
     session = Session(bind=engine, expire_on_commit=False)
     tododb = models.ToDo(task = todo.task)
@@ -89,7 +135,7 @@ def create_todo(todo: schemas.ToDo):
 
 
 @app.get("/todo-get-task/{id}")
-def read_todo(id: int):
+def read_todo(id: int ,token:str= Depends(oauth_scheme)):
 
     session = Session(bind=engine, expire_on_commit=False)
     todo = session.query(models.ToDo).get(id)
@@ -101,7 +147,7 @@ def read_todo(id: int):
 
 
 @app.put("/todo-update/{id}")
-def update_todo(id: int, task: str):
+def update_todo(id: int, task: str ,token:str= Depends(oauth_scheme)):
 
     session = Session(bind=engine, expire_on_commit=False)
 
@@ -117,7 +163,7 @@ def update_todo(id: int, task: str):
     return todo
 
 @app.delete("/todo-delete/{id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_todo(id: int):
+def delete_todo(id: int ,token:str= Depends(oauth_scheme)):
 
     session = Session(bind=engine, expire_on_commit=False)
     todo = session.query(models.ToDo).get(id)
@@ -132,32 +178,12 @@ def delete_todo(id: int):
     return None
 
 @app.get("/todo-all-list")
-def read_todo_list():
+def read_todo_list(token:str= Depends(oauth_scheme)):
     session = Session(bind=engine, expire_on_commit=False)
     todo_list = session.query(models.ToDo).all()
     session.close()
 
     return todo_list
-
-
-
-@app.post("/token")
-async def token_generate(form_data:OAuth2PasswordRequestForm=Depends()):
-    print(form_data)
-    return {'access_token': form_data.username, 'token_type':  'bearer'}
-
-def handle_email_background(email:str, data:str):
-    print(email)
-    print(data)
-    for i in range(10):
-        print(i)
-        time.sleep(0.1)
-
-@app.get("/email-get")
-async def handle_email(email:str, background_task:BackgroundTasks):
-    print(email)
-    background_task.add_task(handle_email_background, email, "This is sample background task ")
-    return {'user': 'sanjana', 'message':'Message Sent Successfully !!!'}
 
 
 
