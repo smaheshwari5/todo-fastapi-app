@@ -22,105 +22,101 @@ from fastapi_jwt_auth import AuthJWT
 
 Base.metadata.create_all(engine)
 
+
+fake_users_db = {
+    "maheshwari": {
+        "username": "maheshwari",
+        "full_name": "sanjana maheshwari",
+        "email": "maheshwarisanjana007@example.com",
+        "hashed_password": "fakehashedsecret",
+        "disabled": False,
+    },
+    "sanjana": {
+        "username": "sanjana",
+        "full_name": "sanjana maheshwari",
+        "email": "sanjanamaheshwari25@example.com",
+        "hashed_password": "fakehashedsecret",
+        "disabled": False,
+    },
+}
+
+
 app = FastAPI()
 
+
+def fake_hash_password(password: str):
+    return "fakehashed" + password
+
 templates = Jinja2Templates(directory='htmldirectory')
-
-
-class Settings(BaseModel):
-    authjwt_secret_key:str = '90eb11fd1ecbde3b265222216d12c8646ba56bcf2c285235541df67cc3cfce75'
-
-
-@AuthJWT.load_config
-def get_config():
-    return Settings()
-
-
-class User(BaseModel):
-    username:str
-    email:str
-    password:str
-
-class UserInDB(User):
-    hashed_password: str
-
-
-    class Config:
-        schema_extra={
-            "example":{
-                "username":"sanjana",
-                "email":"sanjana@gmail.com",
-                "password": "sanjana"
-            }
-        }
-
-class UserLogin(BaseModel):
-    username:str
-    password:str
-
-    class Config:
-        schema_extra={
-            "example":{
-                "username":"sanjana",
-                "password": "sanjana"
-            }
-        }
-users = []
-
-@app.post("/signup", status_code=201)
-def create_user(user:User):
-    new_user={
-        "username":user.username,
-        "email":user.email,
-        "password": user.password
-    }
-
-    users.append(new_user)
-    return new_user
-
-
-@app.get('/users', response_model=List[User])
-def get_users():
-    return users
-
-
-@app.post('/login')
-def login(user:UserLogin, Authorize:AuthJWT= Depends()):
-    for u in users:
-        if (u["username"]==user.username) and (u["password"]==user.password):
-            access_token = Authorize.create_access_token(subject=user.username)
-            refresh_token = Authorize.create_refresh_token(subject=user.username)
-
-            return {"access_token": access_token, "refresh_token": refresh_token}
-
-        raise HTTPException(status_code='401', detail="Invalid username or password ")
-
-
-
-
-Security=HTTPBasic()
 
 
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 oauth_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-def fake_hash_password(password: str):
-    return "fakehashed" + password
+
+class User(BaseModel):
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    disabled: Optional[bool] = None
 
 
-@app.post('/token')
-async def token(form_data:OAuth2PasswordRequestForm=Depends()):
-    return {"access_token": form_data.username +'token'}
+class UserInDB(User):
+    hashed_password: str
 
 
+def get_user(db, username: str):
+    if username in db:
+        user_dict = db[username]
+        return UserInDB(**user_dict)
 
+def fake_decode_token(token):
+    user = get_user(fake_users_db, token)
+    return user
+
+
+async def get_current_user(token: str = Depends(oauth_scheme)):
+    user = fake_decode_token(token)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+async def get_current_active_user(current_user: User = Depends(get_current_user)):
+    if current_user.disabled:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+
+@app.post("/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user_dict = fake_users_db.get(form_data.username)
+    if not user_dict:
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    user = UserInDB(**user_dict)
+    hashed_password = fake_hash_password(form_data.password)
+
+
+    if not hashed_password == user.hashed_password:
+        raise HTTPException(status_code=400, detail="Incorrect username or password")
+    return {"access_token": user.username, "token_type": "bearer"}
+
+
+##########################################################        todo app           ############################################################
 @app.get("/")
 def root(token:str= Depends(oauth_scheme)):
     print("-------   Todo App Creater  -------")
     return {'the_token':token}
 
 
-@app.post("/todo-create", status_code=status.HTTP_201_CREATED)
+
+
+##########################################################        create todo           ############################################################
+@app.post("/todo/create", status_code=status.HTTP_201_CREATED)
 def create_todo(todo: schemas.ToDo ,token:str= Depends(oauth_scheme)):
     print(token)
 
@@ -134,7 +130,8 @@ def create_todo(todo: schemas.ToDo ,token:str= Depends(oauth_scheme)):
 
 
 
-@app.get("/todo-get-task/{id}")
+##########################################################        get todo          ############################################################
+@app.get("/todo/get/{id}")
 def read_todo(id: int ,token:str= Depends(oauth_scheme)):
 
     session = Session(bind=engine, expire_on_commit=False)
@@ -146,7 +143,9 @@ def read_todo(id: int ,token:str= Depends(oauth_scheme)):
     return todo
 
 
-@app.put("/todo-update/{id}")
+
+##########################################################        update todo           ############################################################
+@app.put("/todo/update/{id}")
 def update_todo(id: int, task: str ,token:str= Depends(oauth_scheme)):
 
     session = Session(bind=engine, expire_on_commit=False)
@@ -162,7 +161,9 @@ def update_todo(id: int, task: str ,token:str= Depends(oauth_scheme)):
 
     return todo
 
-@app.delete("/todo-delete/{id}", status_code=status.HTTP_204_NO_CONTENT)
+
+##########################################################        delete todo          ############################################################
+@app.delete("/todo/delete/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_todo(id: int ,token:str= Depends(oauth_scheme)):
 
     session = Session(bind=engine, expire_on_commit=False)
@@ -177,7 +178,9 @@ def delete_todo(id: int ,token:str= Depends(oauth_scheme)):
 
     return None
 
-@app.get("/todo-all-list")
+
+##########################################################        list todo           ############################################################
+@app.get("/todo/list")
 def read_todo_list(token:str= Depends(oauth_scheme)):
     session = Session(bind=engine, expire_on_commit=False)
     todo_list = session.query(models.ToDo).all()
